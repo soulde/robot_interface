@@ -105,8 +105,6 @@ void RobotInterface::recvLoop() {
                 }
                     break;
                 case RecvPackageID::ODOM: {
-                    static uint32_t count;
-
                     serial->Recv(p, sizeof(OdomFeedbackFrame));
                     if (Verify_CRC8_Check_Sum(revBuf,
                                               sizeof(Header) + sizeof(OdomFeedbackFrame))) {
