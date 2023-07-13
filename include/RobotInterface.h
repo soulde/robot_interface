@@ -1,67 +1,32 @@
 //
-// Created by soulde on 2023/6/14.
+// Created by soulde on 2023/3/4.
 //
 
-#ifndef ROBOT_INTERFACE_ROBOTINTERFACE_H
-#define ROBOT_INTERFACE_ROBOTINTERFACE_H
+#ifndef SERIAL_SERIALFRAMEDEALER_H
+#define SERIAL_SERIALFRAMEDEALER_H
 #define float32_t float
 #define float64_t double
 
 #include <thread>
-#include <rclcpp/rclcpp.hpp>
-#include <geometry_msgs/msg/pose_stamped.hpp>
-#include <geometry_msgs/msg/twist.hpp>
-#include <sensor_msgs/msg/nav_sat_fix.hpp>
-#include <nav_msgs/msg/odometry.hpp>
-#include <std_srvs/srv/trigger.hpp>
-#include <eigen3/Eigen/Eigen>
+#include <ros/ros.h>
+#include <geometry_msgs/Twist.h>
+#include <geometry_msgs/PoseStamped.h>
+#include <nav_msgs/Odometry.h>
+#include <sensor_msgs/NavSatFix.h>
+#include <std_msgs/Empty.h>
+#include <std_msgs/Int8.h>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/static_transform_broadcaster.h>
-#include <tf2_eigen/tf2_eigen.hpp>
-//#include <tf2_geometry_msgs/tf2_geometry_msgs/tf2_geometry_msgs.hpp>
-//#include <tf2_eigen/tf2_eigen/tf2_eigen.hpp>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <tf2_eigen/tf2_eigen.h>
+#include <std_srvs/SetBool.h>
+#include <Eigen/Eigen>
 
 #include "Serial.h"
-#include "CRC/CRC.h"
-
-class RobotInterface : public rclcpp::Node {
-
-public:
-    RobotInterface();
-
-private:
-    uint8_t revBuf[50];
-    std::string fixFrame = "world", robotFrame = "base", gimbalFrame = "gimbal", odomFrame = "base_odom";
-    Eigen::Translation3d base2gimbalTrans;
-
-    std::string dev_name;
-    std::shared_ptr<Serial> serial;
-
-    std::unique_ptr<std::thread> thread;
-
-    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr goalPublisher;
-    geometry_msgs::msg::PoseStamped goal;
-
-    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odomPublisher;
-    nav_msgs::msg::Odometry odom;
-
-    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr UWBPublisher;
-    geometry_msgs::msg::PoseStamped uwb;
 
 
-    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr twistSubscriber;
+class RobotInterface {
 
-    rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr GNSSSubscriber;
-
-    std::unique_ptr<tf2_ros::TransformBroadcaster> transformBroadcaster;
-    std::unique_ptr<tf2_ros::StaticTransformBroadcaster> staticTransformBroadcaster;
-    geometry_msgs::msg::TransformStamped base2gimbal, world2base;
-
-    void twistCallback(geometry_msgs::msg::Twist::SharedPtr msg);
-
-    void GNSSCallback(sensor_msgs::msg::NavSatFix::SharedPtr msg);
-
-    [[noreturn]] void recvLoop();
 private:
     static constexpr unsigned char HEAD = 0xFE;
 
@@ -116,23 +81,21 @@ private:
 
     struct HeartBeatFrame {
         Header header;
-
         HeartBeatFrame() {
             header.id = static_cast<unsigned char>(SendPackageID::HEARTBEAT);
         }
     } heartBeatFrame;
 
-    struct GNSSFrame {
+    struct GNSSFrame{
         Header header;
         float32_t lon;
         float32_t lat;
         float32_t alt;
         uint8_t crc8 = 0x0;
-
-        GNSSFrame() {
+        GNSSFrame(){
             header.id = static_cast<unsigned char>(SendPackageID::GNSS);
         }
-    } GNSSFrame;
+    }GNSSFrame;
 
     struct GimbalFeedbackFrame {
         float32_t pitch = 0.;
@@ -165,7 +128,46 @@ private:
         float32_t y;
     } uwbFeedbackFrame;
 #pragma pack()
+    Serial *serial;
+    std::string serialName;
+    std::string subTopic, goalTopic, GNSSTopic="fix";
+    std::string fixFrame = "world", robotFrame = "base", gimbalFrame = "gimbal", odomFrame = "base_odom";
+    bool useBaseOdomOnly = true;
+    Eigen::Translation3d base2gimbalTrans;
+    ros::NodeHandle nodeHandle;
+
+    nav_msgs::Odometry odom;
+    geometry_msgs::TransformStamped base2gimbal, world2base;
+    geometry_msgs::PoseStamped goal, uwb;
+    ros::Publisher goalPublisher, uwbPublisher, odomPublisher;
+    ros::Subscriber twistSubscriber, GNSSSubscriber;
+
+    ros::ServiceClient enemyClient, buffClient;
+
+    tf2_ros::TransformBroadcaster broadcaster;
+    tf2_ros::StaticTransformBroadcaster staticBroadcaster;
+
+    std::thread *recvThread;
+
+    void twistCallback(const geometry_msgs::Twist::ConstPtr &msg);
+
+    void GNSSCallback(const sensor_msgs::NavSatFix::ConstPtr &msg);
+
+    [[noreturn]] void serialRecv();
+
+public:
+    RobotInterface() = delete;
+
+    explicit RobotInterface(ros::NodeHandle &nh);
+
+    ~RobotInterface() {
+        delete serial;
+        delete recvThread;
+    }
+
+    RobotInterface(RobotInterface &serialFrameDealer) = delete;
+
 };
 
 
-#endif //ROBOT_INTERFACE_ROBOTINTERFACE_H
+#endif //SERIAL_SERIALFRAMEDEALER_H

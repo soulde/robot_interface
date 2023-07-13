@@ -1,2 +1,1 @@
-# robot_interface
-ros2 robot interfface
+# robot interface for ROS
