@@ -1,17 +1,10 @@
-//
-// Created by soulde on 2023/6/14.
-//
+#include "RobotInterface.h"
 
-#include <robot_interface/RobotInterface.h>
-
-int main(int argc, char **argv) {
-    rclcpp::init(argc, argv);
-
-    auto node = std::make_shared<RobotInterface>();
-
-
-    rclcpp::spin(node);
-
-    rclcpp::shutdown();
-    return 0;
+int main(int argc, char *argv[]) {
+    ros::init(argc, argv, "serial");
+    ros::NodeHandle nh;
+    RobotInterface dealer(nh);
+    while(ros::ok()){
+        ros::spinOnce();
+    }
 }

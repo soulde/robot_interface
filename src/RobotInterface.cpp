@@ -1,42 +1,68 @@
 //
-// Created by soulde on 2023/6/14.
+// Created by soulde on 2023/3/4.
 //
 
-#include "robot_interface/RobotInterface.h"
+#include "RobotInterface.h"
+#include "CRC/CRC.h"
+#include "Serial.h"
+#include <eigen_conversions/eigen_msg.h>
 
-RobotInterface::RobotInterface() : Node("robot") {
-    this->declare_parameter("dev_name", "STM32");
-    this->get_parameter<std::string>("dev_name", dev_name);
-    serial = std::make_shared<Serial>(dev_name.c_str());
+RobotInterface::RobotInterface(ros::NodeHandle &nh) : nodeHandle(nh) {
+    nh.getParam("/sentry_serial/serialName", serialName);
 
-    twistSubscriber = this->create_subscription<geometry_msgs::msg::Twist>("cmd_vel", 5,
-                                                                           std::bind(&RobotInterface::twistCallback,
-                                                                                     this,
-                                                                                     std::placeholders::_1));
+    nh.getParam("/sentry_serial/subTopic", subTopic);
+    nh.getParam("/sentry_serial/goalTopic", goalTopic);
+    nh.getParam("/sentry_serial/GNSSTopic", GNSSTopic);
 
-    GNSSSubscriber = this->create_subscription<sensor_msgs::msg::NavSatFix>("fix", 5,
-                                                                            std::bind(&RobotInterface::GNSSCallback,
-                                                                                      this,
-                                                                                      std::placeholders::_1));
+    nh.getParam("/sentry_serial/fixFrame", fixFrame);
+    nh.getParam("/sentry_serial/robotFrame", robotFrame);
+    nh.getParam("/sentry_serial/gimbalFrame", gimbalFrame);
 
-    goalPublisher = this->create_publisher<geometry_msgs::msg::PoseStamped>("/goal", 1);
+    nh.getParam("/sentry_serial/base2gimbal_x", base2gimbalTrans.x());
+    nh.getParam("/sentry_serial/base2gimbal_y", base2gimbalTrans.y());
+    nh.getParam("/sentry_serial/base2gimbal_z", base2gimbalTrans.z());
+
+
+    serial = new Serial(serialName.c_str());
+
+
+    odom.header.seq = 0;
+    odom.header.frame_id = fixFrame;
+    odom.child_frame_id = odomFrame;
+
+
+    base2gimbal.header.seq = 0;
+    base2gimbal.header.frame_id = robotFrame;
+    base2gimbal.child_frame_id = gimbalFrame;
+
+    world2base.header.seq = 0;
+    world2base.header.frame_id = fixFrame;
+    world2base.child_frame_id = robotFrame;
+
+    goal.header.seq = 0;
     goal.header.frame_id = fixFrame;
 
-    UWBPublisher = this->create_publisher<geometry_msgs::msg::PoseStamped>("/UWB", 1);
-    uwb.header.frame_id = fixFrame;
+    uwb.header = goal.header;
 
-    odomPublisher = this->create_publisher<nav_msgs::msg::Odometry>("/odom", 1);
-    odom.child_frame_id = robotFrame;
-    odom.header.frame_id = fixFrame;
+    odomPublisher = nh.advertise<nav_msgs::Odometry>("/odom", 1);
+    goalPublisher = nh.advertise<geometry_msgs::PoseStamped>(goalTopic, 1);
+    uwbPublisher = nh.advertise<geometry_msgs::PoseStamped>("/UWB", 1);
+    enemyClient = nh.serviceClient<std_srvs::SetBool>("/enemy");
+    buffClient = nh.serviceClient<std_srvs::SetBool>("/buff");
 
-    transformBroadcaster = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
-    staticTransformBroadcaster = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
+    twistSubscriber = nh.subscribe<geometry_msgs::Twist>(subTopic, 1,
+                                                         [this](const geometry_msgs::Twist::ConstPtr &msg) {
+                                                             this->twistCallback(msg);
+                                                         });
 
-
-    thread = std::make_unique<std::thread>([this]() { recvLoop(); });
+    GNSSSubscriber = nh.subscribe<sensor_msgs::NavSatFix>(GNSSTopic, 1,
+                                                          [this](const sensor_msgs::NavSatFix::ConstPtr &msg) {
+                                                              this->GNSSCallback(msg);
+                                                          });
+    recvThread = new std::thread(&RobotInterface::serialRecv, this);
 }
 
-void RobotInterface::twistCallback(const geometry_msgs::msg::Twist::SharedPtr msg) {
+void RobotInterface::twistCallback(const geometry_msgs::Twist::ConstPtr &msg) {
     Append_CRC8_Check_Sum(reinterpret_cast<unsigned char *>(&moveControlFrame.header), sizeof(Header));
 
     moveControlFrame.x = static_cast<float>(msg->linear.x);
@@ -52,7 +78,7 @@ void RobotInterface::twistCallback(const geometry_msgs::msg::Twist::SharedPtr ms
     std::cout << std::endl;
 }
 
-void RobotInterface::GNSSCallback(sensor_msgs::msg::NavSatFix::SharedPtr msg) {
+void RobotInterface::GNSSCallback(const sensor_msgs::NavSatFix::ConstPtr &msg) {
     Append_CRC8_Check_Sum(reinterpret_cast<unsigned char *>(&GNSSFrame.header), sizeof(Header));
     std::cout << "GNSS Data Send" << std::endl;
     GNSSFrame.lon = static_cast<float>(msg->longitude);
@@ -68,107 +94,124 @@ void RobotInterface::GNSSCallback(sensor_msgs::msg::NavSatFix::SharedPtr msg) {
     std::cout << std::endl;
 }
 
-void RobotInterface::recvLoop() {
+[[noreturn]] void RobotInterface::serialRecv() {
     Header header;
     while (true) {
         // wait until head equals HEAD
         while (true) {
-            serial->Recv(revBuf, 1);
-
-            if (revBuf[0] == HEAD) {
+            serial->Recv(reinterpret_cast<unsigned char *>(&header), 1);
+            if (header.head == HEAD) {
                 break;
             }
         }
-//        std::cout << "rec" << std::endl;
-        serial->Recv(revBuf + 1, sizeof(Header) - 1);
+        serial->Recv(reinterpret_cast<unsigned char *>(&header) + 1, sizeof(Header) - 1);
+        if (Verify_CRC8_Check_Sum(reinterpret_cast<unsigned char *>(&header), sizeof(Header))) {
 
-        if (Verify_CRC8_Check_Sum(revBuf, sizeof(Header))) {
-            memcpy(&header, revBuf, sizeof(Header));
-            auto p = revBuf + sizeof(Header);
-                std::cout << std::hex << static_cast<int>(header.id) << std::endl;
             switch (static_cast<RecvPackageID>(header.id)) {
                 case RecvPackageID::GIMBAL: {
-                    serial->Recv(p, sizeof(GimbalFeedbackFrame));
-                    if (Verify_CRC8_Check_Sum(revBuf, sizeof(Header) + sizeof(GimbalFeedbackFrame))) {
-                        memcpy(p, &gimbalFeedbackFrame, sizeof(GimbalFeedbackFrame));
+                    memcpy(reinterpret_cast<unsigned char *>(&gimbalFeedbackFrame), &header, sizeof(Header));
+                    serial->Recv(reinterpret_cast<unsigned char *>(&gimbalFeedbackFrame) + sizeof(Header),
+                                 sizeof(GimbalFeedbackFrame) - sizeof(Header));
+                    if (Verify_CRC8_Check_Sum(reinterpret_cast<unsigned char *>(&gimbalFeedbackFrame),
+                                              sizeof(GimbalFeedbackFrame))) {
                         base2gimbal = tf2::eigenToTransform(
                                 base2gimbalTrans *
-                                Eigen::AngleAxisd(gimbalFeedbackFrame.pitch / 180 * M_PI,
-                                                  Eigen::Vector3d::UnitY()) *
+                                Eigen::AngleAxisd(gimbalFeedbackFrame.pitch / 180 * M_PI, Eigen::Vector3d::UnitY()) *
                                 Eigen::AngleAxisd(gimbalFeedbackFrame.yaw / 180 * M_PI, Eigen::Vector3d::UnitZ())
                         );
 
-                        base2gimbal.header.stamp = rclcpp::Clock().now();
+                        base2gimbal.header.seq++;
+                        base2gimbal.header.stamp = ros::Time::now();
 
-                        transformBroadcaster->sendTransform(base2gimbal);
+                        broadcaster.sendTransform(base2gimbal);
                     }
                 }
                     break;
                 case RecvPackageID::ODOM: {
+                    memcpy(reinterpret_cast<unsigned char *>(&odomFeedbackFrame), &header, sizeof(Header));
                     static uint32_t count;
+                    serial->Recv(reinterpret_cast<unsigned char *>(&odomFeedbackFrame) + sizeof(Header),
+                                 sizeof(OdomFeedbackFrame) - sizeof(Header));
+                    if (Verify_CRC8_Check_Sum(reinterpret_cast<unsigned char *>(&odomFeedbackFrame),
+                                              sizeof(OdomFeedbackFrame))) {
+                        Eigen::Affine3d affinePos = Eigen::Translation3d(odomFeedbackFrame.x, odomFeedbackFrame.y, 0) *
+                                                    Eigen::AngleAxisd(odomFeedbackFrame.yaw / 180 * M_PI,
+                                                                      Eigen::Vector3d::UnitZ());
+                        Eigen::Matrix<double, 6, 1> twist;
+                        twist << odomFeedbackFrame.vx, odomFeedbackFrame.vy, 0, 0, 0, odomFeedbackFrame.wy;
 
-                    serial->Recv(p, sizeof(OdomFeedbackFrame));
-                    if (Verify_CRC8_Check_Sum(revBuf,
-                                              sizeof(Header) + sizeof(OdomFeedbackFrame))) {
-                        memcpy(p, &odomFeedbackFrame, sizeof(OdomFeedbackFrame));
+                        tf::poseEigenToMsg(affinePos, odom.pose.pose);
+                        tf::twistEigenToMsg(twist, odom.twist.twist);
 
-                        odom.header.stamp = rclcpp::Clock().now();
+                        odom.header.seq++;
+                        odom.header.stamp = ros::Time::now();
 
-                        odomPublisher->publish(odom);
-                        Eigen::Affine3d affinePos =
-                                Eigen::Translation3d(odomFeedbackFrame.x, odomFeedbackFrame.y, 0) *
-                                Eigen::AngleAxisd(odomFeedbackFrame.yaw / 180 * M_PI,
-                                                  Eigen::Vector3d::UnitZ());
+                        odomPublisher.publish(odom);
+
                         world2base = tf2::eigenToTransform(affinePos);
-                        world2base.header.stamp = rclcpp::Clock().now();
+                        world2base.header.seq++;
+                        world2base.header.stamp = ros::Time::now();
 
-                        transformBroadcaster->sendTransform(world2base);
+                        broadcaster.sendTransform(world2base);
                     }
 
                 }
                     break;
                 case RecvPackageID::GOAL: {
-                    serial->Recv(p, sizeof(GoalFeedbackFrame));
-                    if (Verify_CRC8_Check_Sum(revBuf,
-                                              sizeof(Header) + sizeof(GoalFeedbackFrame))) {
-                        memcpy(p, &goalFeedbackFrame, sizeof(GoalFeedbackFrame));
+                    memcpy(reinterpret_cast<unsigned char *>(&goalFeedbackFrame), &header, sizeof(Header));
+                    serial->Recv(reinterpret_cast<unsigned char *>(&goalFeedbackFrame) + sizeof(Header),
+                                 sizeof(GoalFeedbackFrame) - sizeof(Header));
+                    if (Verify_CRC8_Check_Sum(reinterpret_cast<unsigned char *>(&goalFeedbackFrame),
+                                              sizeof(GoalFeedbackFrame))) {
                         goal.pose.position.x = goalFeedbackFrame.x;
                         goal.pose.position.y = goalFeedbackFrame.y;
-                        goalPublisher->publish(goal);
+                        goal.header.seq++;
+
+                        goalPublisher.publish(goal);
                     }
                 }
                     break;
                 case RecvPackageID::ENEMY: {
-                    serial->Recv(p, sizeof(enemyFeedbackFrame));
-                    if (Verify_CRC8_Check_Sum(revBuf, sizeof(Header) + sizeof(enemyFeedbackFrame))) {
-//                        std_srvs::SetBool enemy;
-//                        enemy.request.data = enemyFeedbackFrame.isRed;
+                    memcpy(reinterpret_cast<unsigned char *>(&enemyFeedbackFrame), &header, sizeof(Header));
+                    serial->Recv(reinterpret_cast<unsigned char *>(&enemyFeedbackFrame) + sizeof(Header),
+                                 sizeof(enemyFeedbackFrame) - sizeof(Header));
+                    if (Verify_CRC8_Check_Sum(reinterpret_cast<unsigned char *>(&enemyFeedbackFrame),
+                                              sizeof(enemyFeedbackFrame))) {
+                        std_srvs::SetBool enemy;
+                        enemy.request.data = enemyFeedbackFrame.isRed;
 
-//                        enemyClient.call(enemy);
+                        enemyClient.call(enemy);
                     }
 
                 }
                     break;
                 case RecvPackageID::UWB: {
-
-                    serial->Recv(p, sizeof(UWBFeedbackFrame));
-                    if (Verify_CRC8_Check_Sum(revBuf, sizeof(Header) + sizeof(UWBFeedbackFrame))) {
-                        memcpy(p, &uwbFeedbackFrame, sizeof(UWBFeedbackFrame));
+                    memcpy(reinterpret_cast<unsigned char *>(&uwbFeedbackFrame), &header, sizeof(Header));
+                    serial->Recv(reinterpret_cast<unsigned char *>(&uwbFeedbackFrame) + sizeof(Header),
+                                 sizeof(UWBFeedbackFrame) - sizeof(Header));
+                    if (Verify_CRC8_Check_Sum(reinterpret_cast<unsigned char *>(&uwbFeedbackFrame),
+                                              sizeof(UWBFeedbackFrame))) {
                         uwb.pose.position.x = uwbFeedbackFrame.x;
                         uwb.pose.position.y = uwbFeedbackFrame.y;
-                        uwb.header.stamp = rclcpp::Clock().now();
-                        UWBPublisher->publish(uwb);
+                        uwb.header.stamp = ros::Time::now();
+                        uwb.header.seq++;
+
+                        uwbPublisher.publish(uwb);
                     }
                 }
                     break;
-                case RecvPackageID::BUFF: {
+//                case RecvPackageID::BUFF: {
 //                    std_srvs::SetBool buff;
 //                    buff.request.data = true;
 //                    buffClient.call(buff);
-                }
-                    break;
+//                }
+//                    break;
             }
         }
     }
 }
+
+
+
+
 
