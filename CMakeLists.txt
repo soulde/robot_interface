@@ -8,6 +8,16 @@ endif()
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(Eigen3 REQUIRED)
+find_package(std_srvs REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_eigen REQUIRED)
+
+rosidl_generate_interfaces(${PROJECT_NAME} "srv/LookUpState.srv")
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -20,5 +30,16 @@ if(BUILD_TESTING)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
+
+include_directories(include Serial ${EIGEN3_INCLUDE_DIR})
+add_library(Estimator src/Estimator.cpp)
+add_executable(${PROJECT_NAME}_node src/${PROJECT_NAME}_node.cpp src/RobotInterface.cpp Serial/CRC/CRC.cpp)
+target_link_libraries(${PROJECT_NAME}_node Estimator)
+ament_target_dependencies(${PROJECT_NAME}_node rclcpp nav_msgs geometry_msgs sensor_msgs std_srvs tf2_ros tf2_eigen)
+
+install(DIRECTORY launch  DESTINATION share/${PROJECT_NAME})
+
+install(TARGETS ${PROJECT_NAME}_node DESTINATION lib/${PROJECT_NAME})
+
 
 ament_package()
