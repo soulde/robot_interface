@@ -16,8 +16,8 @@ find_package(std_srvs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_eigen REQUIRED)
-
-rosidl_generate_interfaces(${PROJECT_NAME} "srv/LookUpState.srv")
+find_package(robot_interface REQUIRED)
+rosidl_generate_interfaces(${PROJECT_NAME} "msg/Fusion.msg")
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -35,7 +35,7 @@ include_directories(include Serial ${EIGEN3_INCLUDE_DIR})
 add_library(Estimator src/Estimator.cpp)
 add_executable(${PROJECT_NAME}_node src/${PROJECT_NAME}_node.cpp src/RobotInterface.cpp Serial/CRC/CRC.cpp)
 target_link_libraries(${PROJECT_NAME}_node Estimator)
-ament_target_dependencies(${PROJECT_NAME}_node rclcpp nav_msgs geometry_msgs sensor_msgs std_srvs tf2_ros tf2_eigen)
+ament_target_dependencies(${PROJECT_NAME}_node rclcpp nav_msgs geometry_msgs sensor_msgs std_srvs tf2_ros tf2_eigen robot_interface)
 
 install(DIRECTORY launch  DESTINATION share/${PROJECT_NAME})
 
